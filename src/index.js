@@ -325,14 +325,12 @@ async function migrate({app, path: dir, projectId, dryrun, debug = false, requir
 
 		secretManager = new SecretManagerServiceClient({
 			projectId,
-			auth: {getClient: () => targetClient},
+			authClient: targetClient,
 		});
 
 		firestore = new Firestore({
 			projectId,
-			auth: {
-					getClient: () => targetClient,
-			}
+			authClient: targetClient,
 		});
 	}
 
