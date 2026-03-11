@@ -16,7 +16,9 @@ function wrapper(fn) {
 			t.fail(e);
 		} finally {
 			t.end();
-			result.firestore.disableNetwork && result.firestore.disableNetwork();
+			if (result && result.testEnv) {
+				await result.testEnv.cleanup();
+			}
 		}
 	}
 }
@@ -30,9 +32,20 @@ async function setup() {
 	terminal.reset();
 
 	const projectId = `fireway-test-${Date.now()}`;
-	const app = await firebase.initializeAdminApp({projectId});
-	const firestore = app.firestore();
-	return {projectId, firestore, app};
+	const testEnv = await firebase.initializeTestEnvironment({
+		projectId,
+		firestore: {
+			host: '0.0.0.0',
+			port: 8181,
+		},
+	});
+	const firestore = testEnv.unauthenticatedContext().firestore();
+	// app shim for fireway's migrate({app}) parameter
+	const app = {
+		firestore: () => firestore,
+		auth: () => ({}),
+	};
+	return {projectId, firestore, testEnv, app};
 }
 
 async function assertData(t, firestore, path, value) {
