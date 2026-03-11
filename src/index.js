@@ -289,46 +289,56 @@ async function migrate({app, path: dir, projectId, dryrun, debug = false, requir
 	dryrun && log('Making firestore read-only');
 	proxyWritableMethods();
 
-	const client = await auth.getClient();
-
-	// Impersonate new credentials:
-	let targetClient = new Impersonated({
-			sourceClient: client,
-			targetPrincipal: `main-service-account@${projectId}.iam.gserviceaccount.com`,
-			lifetime: 60*15,
-			delegates: [],
-			targetScopes: ['https://www.googleapis.com/auth/cloud-platform']
-	});
-
 	const providedApp = app;
-	if (!app) {
-		let appOptions = {projectId};
-		if (!process.env.FIRESTORE_EMULATOR_HOST) { // impersonate Firebase services when executed in a non-local environment
+	let targetClient;
+	let firestore;
+	let secretManager;
+
+	if (process.env.FIRESTORE_EMULATOR_HOST) {
+		// Running against the emulator — skip impersonation
+		if (!app) {
+			app = admin.initializeApp({projectId});
+		}
+		secretManager = new SecretManagerServiceClient({projectId});
+		firestore = new Firestore({projectId});
+	} else {
+		const client = await auth.getClient();
+
+		// Impersonate new credentials:
+		targetClient = new Impersonated({
+				sourceClient: client,
+				targetPrincipal: `main-service-account@${projectId}.iam.gserviceaccount.com`,
+				lifetime: 60*15,
+				delegates: [],
+				targetScopes: ['https://www.googleapis.com/auth/cloud-platform']
+		});
+
+		if (!app) {
 			const {res: {data: {accessToken, expireTime}}} = await targetClient.getAccessToken();
-			appOptions = {...appOptions, credential: {
+			app = admin.initializeApp({projectId, credential: {
 				getAccessToken: async () => Promise.resolve({
 					access_token: accessToken,
 					expires_in: Date.parse(expireTime) / 1000,
 				})
-			}}
+			}});
 		}
-		app = admin.initializeApp(appOptions);
-	}
 
-	const secretManager = new SecretManagerServiceClient({
-    projectId,
-    auth: {getClient: () =>targetClient},
-  });
+		secretManager = new SecretManagerServiceClient({
+			projectId,
+			auth: {getClient: () => targetClient},
+		});
+
+		firestore = new Firestore({
+			projectId,
+			auth: {
+					getClient: () => targetClient,
+			}
+		});
+	}
 
 	const elasticsearchClient = await getElasticsearchClient(projectId, secretManager);
 
 	// Use Firestore directly so we can mock for dryruns
-	const firestore = new Firestore({
-		projectId,
-		auth: {
-				getClient: () => targetClient,
-		}
-	});
 	firestore._fireway_stats = stats;
 
 	const collection = firestore.collection('fireway');
@@ -432,7 +442,7 @@ const getElasticsearchClient = async (projectId, secretManager) => {
 
 	const TIMEOUT_10_MINUTES = 10 * 60 * 1000;
 
-	if (projectId === 'akeneo-syndication') {
+	if (process.env.FIRESTORE_EMULATOR_HOST || projectId === 'akeneo-syndication') {
 		return new ElasticsearchClient({
 			node: 'http://localhost:9200',
 		});
