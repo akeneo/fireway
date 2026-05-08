@@ -6,7 +6,6 @@ const fs = require('fs');
 const md5 = require('md5');
 const admin = require('firebase-admin');
 const {Firestore, WriteBatch, CollectionReference, FieldValue, FieldPath, Timestamp} = require('@google-cloud/firestore');
-const {GoogleAuth, Impersonated} = require('google-auth-library');
 const {SecretManagerServiceClient} = require('@google-cloud/secret-manager');
 const { Client: ElasticsearchClient } = require('@elastic/elasticsearch')
 
@@ -18,8 +17,6 @@ const readFile = util.promisify(fs.readFile);
 const readdir = util.promisify(fs.readdir);
 const stat = util.promisify(fs.stat);
 const exists = util.promisify(fs.exists);
-
-const auth = new GoogleAuth();
 
 // Track stats and dryrun setting so we only proxy once.
 // Multiple proxies would create a memory leak.
@@ -290,49 +287,12 @@ async function migrate({app, path: dir, projectId, dryrun, debug = false, requir
 	proxyWritableMethods();
 
 	const providedApp = app;
-	let targetClient;
-	let firestore;
-	let secretManager;
 
-	if (process.env.FIRESTORE_EMULATOR_HOST) {
-		// Running against the emulator — skip impersonation
-		if (!app) {
-			app = admin.initializeApp({projectId});
-		}
-		secretManager = new SecretManagerServiceClient({projectId});
-		firestore = new Firestore({projectId});
-	} else {
-		const client = await auth.getClient();
-
-		// Impersonate new credentials:
-		targetClient = new Impersonated({
-				sourceClient: client,
-				targetPrincipal: `main-service-account@${projectId}.iam.gserviceaccount.com`,
-				lifetime: 60*15,
-				delegates: [],
-				targetScopes: ['https://www.googleapis.com/auth/cloud-platform']
-		});
-
-		if (!app) {
-			const {res: {data: {accessToken, expireTime}}} = await targetClient.getAccessToken();
-			app = admin.initializeApp({projectId, credential: {
-				getAccessToken: async () => Promise.resolve({
-					access_token: accessToken,
-					expires_in: Date.parse(expireTime) / 1000,
-				})
-			}});
-		}
-
-		secretManager = new SecretManagerServiceClient({
-			projectId,
-			authClient: targetClient,
-		});
-
-		firestore = new Firestore({
-			projectId,
-			authClient: targetClient,
-		});
+	if (!app) {
+		app = admin.initializeApp({projectId});
 	}
+	const secretManager = new SecretManagerServiceClient({projectId});
+	const firestore = new Firestore({projectId});
 
 	const elasticsearchClient = await getElasticsearchClient(projectId, secretManager);
 
