@@ -6,8 +6,8 @@ const fs = require('fs');
 const md5 = require('md5');
 const admin = require('firebase-admin');
 const {Firestore, WriteBatch, CollectionReference, FieldValue, FieldPath, Timestamp} = require('@google-cloud/firestore');
-const {GoogleAuth, Impersonated} = require('google-auth-library');
 const {SecretManagerServiceClient} = require('@google-cloud/secret-manager');
+const {GoogleAuth, Impersonated} = require('google-auth-library');
 const { Client: ElasticsearchClient } = require('@elastic/elasticsearch')
 
 const semver = require('semver');
@@ -18,8 +18,6 @@ const readFile = util.promisify(fs.readFile);
 const readdir = util.promisify(fs.readdir);
 const stat = util.promisify(fs.stat);
 const exists = util.promisify(fs.exists);
-
-const auth = new GoogleAuth();
 
 // Track stats and dryrun setting so we only proxy once.
 // Multiple proxies would create a memory leak.
@@ -290,49 +288,54 @@ async function migrate({app, path: dir, projectId, dryrun, debug = false, requir
 	proxyWritableMethods();
 
 	const providedApp = app;
-	let targetClient;
-	let firestore;
-	let secretManager;
 
-	if (process.env.FIRESTORE_EMULATOR_HOST) {
-		// Running against the emulator — skip impersonation
-		if (!app) {
-			app = admin.initializeApp({projectId});
-		}
-		secretManager = new SecretManagerServiceClient({projectId});
-		firestore = new Firestore({projectId});
-	} else {
-		const client = await auth.getClient();
-
-		// Impersonate new credentials:
-		targetClient = new Impersonated({
-				sourceClient: client,
-				targetPrincipal: `main-service-account@${projectId}.iam.gserviceaccount.com`,
-				lifetime: 60*15,
-				delegates: [],
-				targetScopes: ['https://www.googleapis.com/auth/cloud-platform']
-		});
-
-		if (!app) {
-			const {res: {data: {accessToken, expireTime}}} = await targetClient.getAccessToken();
-			app = admin.initializeApp({projectId, credential: {
-				getAccessToken: async () => Promise.resolve({
-					access_token: accessToken,
-					expires_in: Date.parse(expireTime) / 1000,
-				})
-			}});
-		}
-
-		secretManager = new SecretManagerServiceClient({
-			projectId,
-			authClient: targetClient,
-		});
-
-		firestore = new Firestore({
-			projectId,
-			authClient: targetClient,
+	// If FIREWAY_IMPERSONATE_SA is set, wrap ADC with an Impersonated client
+	// targeting that service account. Otherwise use ADC directly.
+	//
+	// This lets consumers control whether fireway does the impersonation hop
+	// itself (env var set → fireway wraps source ADC → target SA) or whether
+	// ADC is already configured to mint tokens for the right identity
+	// (env var unset → use ADC directly).
+	//
+	// CI typically wants: ADC is the federated/ci identity, env var asks
+	// fireway to impersonate the production-style SA.
+	// Local typically wants: ADC was set up with
+	// `gcloud auth application-default login --impersonate-service-account=...`
+	// so ADC already mints target-SA tokens; env var unset, no double hop.
+	const targetSA = process.env.FIREWAY_IMPERSONATE_SA;
+	let authClient = null;
+	if (targetSA) {
+		const auth = new GoogleAuth();
+		const sourceClient = await auth.getClient();
+		authClient = new Impersonated({
+			sourceClient,
+			targetPrincipal: targetSA,
+			lifetime: 60 * 15,
+			delegates: [],
+			targetScopes: ['https://www.googleapis.com/auth/cloud-platform'],
 		});
 	}
+
+	if (!app) {
+		if (authClient) {
+			const {res} = await authClient.getAccessToken();
+			const {accessToken, expireTime} = res.data;
+			app = admin.initializeApp({
+				projectId,
+				credential: {
+					getAccessToken: async () => ({
+						access_token: accessToken,
+						expires_in: Math.floor((Date.parse(expireTime) - Date.now()) / 1000),
+					}),
+				},
+			});
+		} else {
+			app = admin.initializeApp({projectId});
+		}
+	}
+	const clientOpts = authClient ? {projectId, authClient} : {projectId};
+	const secretManager = new SecretManagerServiceClient(clientOpts);
+	const firestore = new Firestore(clientOpts);
 
 	const elasticsearchClient = await getElasticsearchClient(projectId, secretManager);
 

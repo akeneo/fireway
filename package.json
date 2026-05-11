@@ -34,7 +34,7 @@
     "@google-cloud/secret-manager": "^6.1.1",
     "callsites": "^3.1.0",
     "firebase-admin": "^13.7.0",
-    "google-auth-library": "^10.5.0",
+    "google-auth-library": "^10.6.2",
     "md5": "^2.3.0",
     "sade": "^1.8.1",
     "semver": "^7.3.7"
